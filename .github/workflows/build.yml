@@ -43,6 +43,10 @@ jobs:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
+          # Unity 6 Personal: GameCI reads a serial out of UNITY_LICENSE, which fails for the new
+          # entitlement licenses ("serial invalid"), so Unity signs in by itself instead.
+          skipActivation: true
+          customParameters: -username ${{ secrets.UNITY_EMAIL }} -password ${{ secrets.UNITY_PASSWORD }}
           targetPlatform: Android
           buildMethod: RaceGame.Editor.BuildScript.BuildAndroid
       - uses: actions/upload-artifact@v4
@@ -77,6 +81,10 @@ jobs:
           UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
           UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
         with:
+          # Unity 6 Personal: GameCI reads a serial out of UNITY_LICENSE, which fails for the new
+          # entitlement licenses ("serial invalid"), so Unity signs in by itself instead.
+          skipActivation: true
+          customParameters: -username ${{ secrets.UNITY_EMAIL }} -password ${{ secrets.UNITY_PASSWORD }}
           targetPlatform: iOS
           buildMethod: RaceGame.Editor.BuildScript.ExportIOS
       - uses: actions/upload-artifact@v4
