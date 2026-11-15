@@ -19,6 +19,16 @@ jobs:
   android:
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space (Unity images are > 10 GB)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
       - uses: actions/checkout@v4
         with:
           lfs: true
@@ -43,6 +53,16 @@ jobs:
   ios-xcode:
     runs-on: ubuntu-latest
     steps:
+      - name: Free disk space (Unity images are > 10 GB)
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: true
+          swap-storage: true
       - uses: actions/checkout@v4
         with:
           lfs: true
