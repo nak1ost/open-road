@@ -21,12 +21,16 @@ namespace RaceGame.UI
 
         public Page page = Page.Main;
         public string playerName = "Игрок";
+        public string seedText = "20261115";
         public string message;
 
         // filled by GameManager
         public MapLayout layout;
         public Func<NetSession> getNet;
         public Func<RaceSession> getRace;
+        /// <summary>Race routes near the player (the map is endless, so the list depends on where you are).</summary>
+        public Func<List<RouteData>> getRoutes;
+        List<RouteData> routes = new List<RouteData>();
 
         // actions back to the game
         public Action onFreeRoam;
@@ -39,6 +43,20 @@ namespace RaceGame.UI
         public Action onStopRaceForAll;
         public Action onResume;
         public Action onOpenGarage;
+        /// <summary>Called before free roam / races / hosting so the island is rebuilt for the typed seed.</summary>
+        public Action onApplySeed;
+
+        /// <summary>Seed from the text field (digits only; empty → 0).</summary>
+        public int Seed
+        {
+            get
+            {
+                long v = 0;
+                foreach (char ch in seedText ?? "")
+                    if (ch >= '0' && ch <= '9') v = (v * 10 + (ch - '0')) % int.MaxValue;
+                return (int)v;
+            }
+        }
 
         int bots = 3;
         Vector2 scroll;
@@ -67,6 +85,7 @@ namespace RaceGame.UI
         {
             page = p;
             scroll = Vector2.zero;
+            if (p == Page.Races) routes = getRoutes?.Invoke() ?? new List<RouteData>();
         }
 
         void OnGUI()
@@ -104,13 +123,19 @@ namespace RaceGame.UI
         void MainPage()
         {
             GUILayout.Label("OPEN ROAD", title, GUILayout.Height(70f));
-            GUILayout.Label("Остров 8×8 км · 7 марок · тюнинг · гонки · игра по Wi-Fi", small);
+            GUILayout.Label("Бесконечный мир · 7 марок · тюнинг · гонки · игра по Wi-Fi", small);
             GUILayout.Space(10f);
             GUILayout.Label("Твоё имя:", label);
             playerName = GUILayout.TextField(playerName, 16, field);
-            GUILayout.Space(14f);
-            if (GUILayout.Button("Свободная езда", button)) { message = null; onFreeRoam?.Invoke(); }
-            if (GUILayout.Button("Гонки с ботами", button)) { racesBack = Page.Main; Show(Page.Races); }
+            GUILayout.Label("Сид мира (одно число — один и тот же мир):", label);
+            GUILayout.BeginHorizontal();
+            seedText = GUILayout.TextField(seedText, 9, field);
+            if (GUILayout.Button("Случайный", button, GUILayout.Width(150f)))
+                seedText = UnityEngine.Random.Range(1, 999999999).ToString();
+            GUILayout.EndHorizontal();
+            GUILayout.Space(10f);
+            if (GUILayout.Button("Свободная езда", button)) { message = null; onApplySeed?.Invoke(); onFreeRoam?.Invoke(); }
+            if (GUILayout.Button("Гонки с ботами", button)) { onApplySeed?.Invoke(); racesBack = Page.Main; Show(Page.Races); }
             if (GUILayout.Button("Игра по Wi-Fi (LAN)", button)) { message = null; Show(Page.Lan); }
             if (GUILayout.Button("Гараж", button)) onOpenGarage?.Invoke();
             GUILayout.FlexibleSpace();
@@ -130,8 +155,9 @@ namespace RaceGame.UI
                 if (GUILayout.Button("+", button, GUILayout.Width(60f))) bots = Mathf.Min(7, bots + 1);
                 GUILayout.EndHorizontal();
             }
+            GUILayout.Label("<i>Трассы рядом с тобой. Уедешь дальше — появятся другие города и маршруты.</i>", small);
             scroll = GUILayout.BeginScrollView(scroll);
-            foreach (var r in layout.routes)
+            foreach (var r in routes)
             {
                 string kind = r.circuit ? $"круг × {r.laps}" : "спринт";
                 if (GUILayout.Button($"{r.name}\n<size=14>{kind} · {r.Length * r.laps / 1000f:0.0} км</size>", new GUIStyle(button) { fixedHeight = 62f }))
@@ -151,7 +177,8 @@ namespace RaceGame.UI
             GUILayout.Label("Все телефоны должны быть в одной Wi-Fi сети (или раздай точку доступа с одного из них).", small);
             GUILayout.Label($"Твой IP: <b>{NetSession.LocalAddressText()}</b>", small);
             GUILayout.Space(8f);
-            if (GUILayout.Button("Создать игру", button)) { message = null; onHostLan?.Invoke(); }
+            GUILayout.Label($"Мир для новой игры: сид <b>{Seed}</b> (меняется в главном меню). Подключившиеся получат этот же мир.", small);
+            if (GUILayout.Button("Создать игру", button)) { message = null; onApplySeed?.Invoke(); onHostLan?.Invoke(); }
             GUILayout.Space(8f);
 
             bool scanning = scan != null && !scan.IsCompleted;

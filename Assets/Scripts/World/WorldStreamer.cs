@@ -6,13 +6,13 @@ using UnityEngine;
 namespace RaceGame.World
 {
     /// <summary>
-    /// Builds the 8×8 km island in 1×1 km tiles around the player: terrain, road meshes (with colliders),
+    /// Builds the endless world in 1×1 km tiles around the player: terrain, road meshes (with colliders),
     /// buildings and trees. Far tiles are destroyed, near ones are generated over several frames.
+    /// This object stays at -OriginShift.Offset, so its children are placed in GLOBAL coordinates.
     /// </summary>
     public class WorldStreamer : MonoBehaviour
     {
         public const float TileSize = 1000f;
-        public const int TilesPerSide = 8;
         const int HeightRes = 257;
         const int AlphaRes = 128;
         const float LoadRadius = 1700f;
@@ -27,28 +27,26 @@ namespace RaceGame.World
         Material terrainMat, roadMat, waterMat, trunkMat, crownMat;
         Material[] buildingMats;
         Mesh cylinderMesh, sphereMesh;
+        Transform water;
         bool busy;
 
         public void Init(MapLayout layout)
         {
             Layout = layout;
+            transform.position = -OriginShift.Offset;
             CreateMaterials();
             CreateWater();
-            CreateBorders();
         }
 
-        static Vector2Int TileOf(Vector3 p) =>
-            new Vector2Int(Mathf.FloorToInt((p.x + MapLayout.Half) / TileSize), Mathf.FloorToInt((p.z + MapLayout.Half) / TileSize));
+        static Vector2Int TileOf(Vector3 global) =>
+            new Vector2Int(Mathf.FloorToInt(global.x / TileSize), Mathf.FloorToInt(global.z / TileSize));
 
-        static Vector3 TileOrigin(Vector2Int t) =>
-            new Vector3(t.x * TileSize - MapLayout.Half, MapLayout.MinY, t.y * TileSize - MapLayout.Half);
+        static Vector3 TileOrigin(Vector2Int t) => new Vector3(t.x * TileSize, MapLayout.MinY, t.y * TileSize);
 
-        static bool Valid(Vector2Int t) => t.x >= 0 && t.y >= 0 && t.x < TilesPerSide && t.y < TilesPerSide;
-
-        /// <summary>Synchronously builds the tiles around a point (before spawning a car there).</summary>
-        public void Prewarm(Vector3 point)
+        /// <summary>Synchronously builds the tiles around a GLOBAL point (before putting a car there).</summary>
+        public void Prewarm(Vector3 global)
         {
-            foreach (var t in WantedTiles(point))
+            foreach (var t in WantedTiles(global))
                 if (!tiles.ContainsKey(t))
                 {
                     var it = BuildTile(t);
@@ -56,11 +54,13 @@ namespace RaceGame.World
                 }
         }
 
-        List<Vector2Int> WantedTiles(Vector3 p)
+        static List<Vector2Int> WantedTiles(Vector3 p)
         {
             var list = new List<Vector2Int>();
-            for (int x = 0; x < TilesPerSide; x++)
-            for (int z = 0; z < TilesPerSide; z++)
+            var c = TileOf(p);
+            int r = Mathf.CeilToInt(LoadRadius / TileSize) + 1;
+            for (int x = c.x - r; x <= c.x + r; x++)
+            for (int z = c.y - r; z <= c.y + r; z++)
             {
                 var t = new Vector2Int(x, z);
                 if (DistanceToTile(p, t) < LoadRadius) list.Add(t);
@@ -80,16 +80,17 @@ namespace RaceGame.World
         void Update()
         {
             if (Layout == null || target == null) return;
-            Vector3 p = target.position;
+            Vector3 p = OriginShift.ToGlobal(target.position);
 
-            // unload far tiles
+            // the sea follows the player: there is water at the horizon everywhere
+            water.position = new Vector3(target.position.x, MapLayout.SeaLevel, target.position.z);
+
             List<Vector2Int> remove = null;
             foreach (var kv in tiles)
                 if (DistanceToTile(p, kv.Key) > UnloadRadius) (remove ??= new List<Vector2Int>()).Add(kv.Key);
             if (remove != null)
                 foreach (var t in remove) { Destroy(tiles[t]); tiles.Remove(t); }
 
-            // load the nearest missing tile
             if (busy) return;
             foreach (var t in WantedTiles(p))
             {
@@ -116,9 +117,9 @@ namespace RaceGame.World
             Vector3 origin = TileOrigin(t);
             var root = new GameObject($"Tile_{t.x}_{t.y}");
             root.transform.SetParent(transform, false);
+            root.transform.localPosition = new Vector3(origin.x, 0f, origin.z); // children are relative to the tile corner
             root.SetActive(false);
 
-            // --- heights ---
             var heights = new float[HeightRes, HeightRes];
             float step = TileSize / (HeightRes - 1);
             for (int z = 0; z < HeightRes; z++)
@@ -131,7 +132,6 @@ namespace RaceGame.World
                 if ((z & 31) == 31) yield return null;
             }
 
-            // --- splat map: grass / rock / sand / dirt by slope and height ---
             var alpha = new float[AlphaRes, AlphaRes, 4];
             float aStep = (HeightRes - 1f) / (AlphaRes - 1f);
             for (int z = 0; z < AlphaRes; z++)
@@ -167,45 +167,45 @@ namespace RaceGame.World
             var terrainGo = Terrain.CreateTerrainGameObject(data);
             terrainGo.name = "Terrain";
             terrainGo.transform.SetParent(root.transform, false);
-            terrainGo.transform.position = origin;
+            terrainGo.transform.localPosition = new Vector3(0f, MapLayout.MinY, 0f);
             var terrain = terrainGo.GetComponent<Terrain>();
             if (terrainMat != null) terrain.materialTemplate = terrainMat;
             terrain.drawTreesAndFoliage = false;
-            terrain.allowAutoConnect = true; // stitches LOD seams with neighbour tiles
+            terrain.allowAutoConnect = true;
             terrain.heightmapPixelError = 6f;
             terrain.basemapDistance = 400f;
             terrain.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
             yield return null;
 
-            BuildRoads(t, root.transform);
+            BuildRoads(origin, root.transform);
             yield return null;
-            BuildBuildings(t, root.transform);
-            BuildTrees(t, root.transform);
+            BuildBuildings(origin, root.transform);
+            BuildTrees(t, origin, root.transform);
 
             root.SetActive(true);
             tiles[t] = root;
         }
 
-        void BuildRoads(Vector2Int t, Transform parent)
+        void BuildRoads(Vector3 o, Transform parent)
         {
-            Vector3 o = TileOrigin(t);
+            var area = new Rect(o.x, o.z, TileSize, TileSize);
             var verts = new List<Vector3>();
             var uvs = new List<Vector2>();
             var tris = new List<int>();
+            var corner = new Vector3(o.x, 0f, o.z);
 
-            foreach (var road in Layout.roads)
+            foreach (var road in Layout.RoadsIn(area))
             {
                 var pts = road.points;
                 int i = 0;
                 while (i < pts.Count)
                 {
-                    // find a run of samples inside this tile
                     while (i < pts.Count && !Inside(pts[i], o)) i++;
                     if (i >= pts.Count) break;
                     int start = Mathf.Max(0, i - 1);
                     while (i < pts.Count && Inside(pts[i], o)) i++;
                     int end = Mathf.Min(pts.Count - 1, i);
-                    AddStrip(road, start, end, verts, uvs, tris);
+                    AddStrip(road, start, end, corner, verts, uvs, tris);
                 }
             }
             if (verts.Count == 0) return;
@@ -229,7 +229,8 @@ namespace RaceGame.World
         static bool Inside(Vector3 p, Vector3 o) =>
             p.x >= o.x && p.x < o.x + TileSize && p.z >= o.z && p.z < o.z + TileSize;
 
-        static void AddStrip(Road road, int start, int end, List<Vector3> verts, List<Vector2> uvs, List<int> tris)
+        /// <summary>Road strip; vertices are relative to the tile corner to keep float precision far from (0,0).</summary>
+        static void AddStrip(Road road, int start, int end, Vector3 corner, List<Vector3> verts, List<Vector2> uvs, List<int> tris)
         {
             var pts = road.points;
             if (end <= start) return;
@@ -242,7 +243,7 @@ namespace RaceGame.World
                 if (dir.sqrMagnitude < 1e-6f) dir = Vector3.forward;
                 dir.Normalize();
                 var right = new Vector3(dir.z, 0f, -dir.x);
-                Vector3 p = pts[i] + Vector3.up * road.yOffset;
+                Vector3 p = pts[i] - corner + Vector3.up * road.yOffset;
                 if (i > start) v += Vector3.Distance(pts[i], pts[i - 1]) / (road.halfWidth * 4f);
                 verts.Add(p - right * road.halfWidth);
                 verts.Add(p + right * road.halfWidth);
@@ -257,13 +258,13 @@ namespace RaceGame.World
             }
         }
 
-        void BuildBuildings(Vector2Int t, Transform parent)
+        void BuildBuildings(Vector3 o, Transform parent)
         {
-            Vector3 o = TileOrigin(t);
+            var area = new Rect(o.x, o.z, TileSize, TileSize);
+            var corner = new Vector3(o.x, 0f, o.z);
             Transform group = null;
-            foreach (var b in Layout.buildings)
+            foreach (var b in Layout.BuildingsIn(area))
             {
-                if (!Inside(b.position, o)) continue;
                 if (group == null)
                 {
                     group = new GameObject("Buildings").transform;
@@ -271,21 +272,20 @@ namespace RaceGame.World
                 }
                 var go = GameObject.CreatePrimitive(PrimitiveType.Cube);
                 go.transform.SetParent(group, false);
-                go.transform.position = b.position + Vector3.up * (b.size.y * 0.5f - 0.5f);
+                go.transform.localPosition = b.position - corner + Vector3.up * (b.size.y * 0.5f - 0.5f);
                 go.transform.localScale = b.size + Vector3.up;
                 go.GetComponent<Renderer>().sharedMaterial = buildingMats[b.color % buildingMats.Length];
-                go.isStatic = true;
             }
         }
 
-        void BuildTrees(Vector2Int t, Transform parent)
+        void BuildTrees(Vector2Int t, Vector3 o, Transform parent)
         {
-            Vector3 o = TileOrigin(t);
-            var rng = new System.Random(Layout.seed * 7919 + t.x * 131 + t.y);
+            var rng = new System.Random((int)MapLayout.Hash(Layout.seed, t.x * 131 + 7, t.y));
             var trunks = new List<CombineInstance>();
             var crowns = new List<CombineInstance>();
             var collidersGo = new GameObject("Trees");
             collidersGo.transform.SetParent(parent, false);
+            var corner = new Vector3(o.x, 0f, o.z);
 
             for (int i = 0; i < 260 && trunks.Count < 140; i++)
             {
@@ -297,7 +297,7 @@ namespace RaceGame.World
                 if (Layout.NearRoad(x, z, 16f)) continue;
 
                 float s = 0.8f + (float)rng.NextDouble() * 0.6f;
-                var basePos = new Vector3(x, h, z);
+                var basePos = new Vector3(x, h, z) - corner;
                 trunks.Add(new CombineInstance
                 {
                     mesh = cylinderMesh,
@@ -407,38 +407,28 @@ namespace RaceGame.World
 
         void CreateWater()
         {
-            var water = GameObject.CreatePrimitive(PrimitiveType.Plane);
-            water.name = "Sea";
-            Destroy(water.GetComponent<Collider>());
-            water.transform.SetParent(transform, false);
-            water.transform.position = new Vector3(0f, MapLayout.SeaLevel, 0f);
-            water.transform.localScale = new Vector3(MapLayout.Size * 1.6f / 10f, 1f, MapLayout.Size * 1.6f / 10f);
-            water.GetComponent<Renderer>().sharedMaterial = waterMat;
+            var go = GameObject.CreatePrimitive(PrimitiveType.Plane);
+            go.name = "Sea";
+            Destroy(go.GetComponent<Collider>());
+            // not a child of the world: it follows the player in local space instead
+            water = go.transform;
+            water.position = new Vector3(0f, MapLayout.SeaLevel, 0f);
+            water.localScale = new Vector3(1000f, 1f, 1000f); // 10×10 km, always centred under the player
+            go.GetComponent<Renderer>().sharedMaterial = waterMat;
         }
 
-        void CreateBorders()
+        void OnDestroy()
         {
-            float e = MapLayout.Half + 50f;
-            Wall(new Vector3(0f, 50f, e), new Vector3(MapLayout.Size + 200f, 200f, 10f));
-            Wall(new Vector3(0f, 50f, -e), new Vector3(MapLayout.Size + 200f, 200f, 10f));
-            Wall(new Vector3(e, 50f, 0f), new Vector3(10f, 200f, MapLayout.Size + 200f));
-            Wall(new Vector3(-e, 50f, 0f), new Vector3(10f, 200f, MapLayout.Size + 200f));
+            if (water != null) Destroy(water.gameObject);
         }
 
-        void Wall(Vector3 pos, Vector3 size)
+        /// <summary>Ground height under a LOCAL point using physics (roads, terrain), falls back to the layout.</summary>
+        public float GroundHeight(Vector3 local)
         {
-            var go = new GameObject("Border");
-            go.transform.SetParent(transform, false);
-            go.transform.position = pos;
-            go.AddComponent<BoxCollider>().size = size;
-        }
-
-        /// <summary>Ground height under a point using physics (roads, terrain), falls back to the layout.</summary>
-        public float GroundHeight(Vector3 p)
-        {
-            if (Physics.Raycast(new Vector3(p.x, 400f, p.z), Vector3.down, out var hit, 600f, ~0, QueryTriggerInteraction.Ignore))
+            if (Physics.Raycast(new Vector3(local.x, 400f, local.z), Vector3.down, out var hit, 600f, ~0, QueryTriggerInteraction.Ignore))
                 return hit.point.y;
-            return Layout.Height(p.x, p.z);
+            var g = OriginShift.ToGlobal(local);
+            return Layout.Height(g.x, g.z);
         }
     }
 }

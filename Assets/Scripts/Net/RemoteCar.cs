@@ -33,19 +33,19 @@ namespace RaceGame.Net
             if (lastTime >= 0f && s.seq <= lastSeq && lastSeq - s.seq < 1000) return; // old packet
             lastSeq = s.seq;
             bool first = lastTime < 0f;
-            lastPos = s.position;
+            lastPos = s.position; // GLOBAL, converted to local every frame (our origin may move)
             lastRot = s.rotation;
             lastVel = s.velocity;
             lastTime = Time.time;
             car.steerInput = s.steer;
-            if (first) transform.SetPositionAndRotation(lastPos, lastRot);
+            if (first) transform.SetPositionAndRotation(World.OriginShift.ToLocal(lastPos), lastRot);
         }
 
         void Update()
         {
             if (lastTime < 0f) return;
             float age = Mathf.Min(Time.time - lastTime, 0.3f);
-            Vector3 target = lastPos + lastVel * age;
+            Vector3 target = World.OriginShift.ToLocal(lastPos + lastVel * age);
             float k = 1f - Mathf.Exp(-15f * Time.deltaTime);
             if ((transform.position - target).sqrMagnitude > 400f) transform.position = target; // teleported
             else transform.position = Vector3.Lerp(transform.position, target, k);

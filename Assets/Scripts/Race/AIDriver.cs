@@ -20,7 +20,7 @@ namespace RaceGame.Race
         void Start()
         {
             car = GetComponent<CarController>();
-            index = race.NearestRouteIndex(transform.position, 0);
+            index = race.NearestRouteIndex(World.OriginShift.ToGlobal(transform.position), 0);
         }
 
         void FixedUpdate()
@@ -33,14 +33,14 @@ namespace RaceGame.Race
                 return;
             }
 
-            index = race.NearestRouteIndex(transform.position, index);
+            index = race.NearestRouteIndex(World.OriginShift.ToGlobal(transform.position), index);
             float speed = car.SpeedKmh / 3.6f;
 
             // steer at a point ahead, further at higher speed
             int look = 3 + Mathf.RoundToInt(speed * 0.25f);
             int ti = race.Wrap(index + look);
             if (ti < 0) ti = race.Route.points.Count - 1;
-            Vector3 target = race.Route.points[ti];
+            Vector3 target = World.OriginShift.ToLocal(race.Route.points[ti]);
             Vector3 local = transform.InverseTransformPoint(target);
             float angle = Mathf.Atan2(local.x, local.z) * Mathf.Rad2Deg;
             car.steerInput = Mathf.Clamp(angle / 25f, -1f, 1f);

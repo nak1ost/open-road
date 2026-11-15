@@ -19,6 +19,7 @@ namespace RaceGame.Save
         public int version = 2;
         public string selectedCarId;
         public string playerName = "Игрок";
+        public int mapSeed = 20261115;
         public List<CarSave> cars = new List<CarSave>();
     }
 

@@ -55,6 +55,7 @@ namespace RaceGame.Race
         public void Setup(RouteData route)
         {
             Route = route;
+            transform.position = -OriginShift.Offset; // children (gates) are placed in GLOBAL coordinates
             BuildCheckpoints();
             gateMat = MaterialFactory.Create(MaterialFactory.Emissive, new Color(1f, 0.75f, 0.1f));
             gateMatDim = MaterialFactory.Create(MaterialFactory.Emissive, new Color(0.4f, 0.3f, 0.05f));
@@ -91,7 +92,7 @@ namespace RaceGame.Race
             }
         }
 
-        /// <summary>Grid slot n (0 = pole position) behind the start line.</summary>
+        /// <summary>Grid slot n (0 = pole position) behind the start line, GLOBAL coordinates.</summary>
         public Pose GridSlot(int n)
         {
             var pts = Route.points;
@@ -165,7 +166,7 @@ namespace RaceGame.Race
         {
             int target = r.nextCheckpoint % checkpoints.Count;
             Vector3 cp = checkpoints[target];
-            Vector3 p = r.transform.position;
+            Vector3 p = OriginShift.ToGlobal(r.transform.position);
             if (Vector2.Distance(new Vector2(p.x, p.z), new Vector2(cp.x, cp.z)) > CheckpointRadius) return;
 
             bool isFinishLine = Route.circuit ? target == 0 : target == checkpoints.Count - 1;
@@ -186,7 +187,7 @@ namespace RaceGame.Race
         {
             if (r.Finished) return 1e6f - r.finishTime;
             int target = r.nextCheckpoint % checkpoints.Count;
-            float d = Vector3.Distance(r.transform.position, checkpoints[target]);
+            float d = Vector3.Distance(OriginShift.ToGlobal(r.transform.position), checkpoints[target]);
             // nextCheckpoint keeps counting across laps, so it alone orders the racers
             return r.nextCheckpoint - Mathf.Clamp01(d / CheckpointSpacing);
         }
@@ -219,9 +220,10 @@ namespace RaceGame.Race
             return list;
         }
 
+        /// <summary>GLOBAL position of the racer's next checkpoint.</summary>
         public Vector3 NextCheckpointPosition(Racer r) => checkpoints[r.nextCheckpoint % checkpoints.Count];
 
-        /// <summary>Route point index nearest ahead of a position (for bots and respawn).</summary>
+        /// <summary>Route point index nearest to a GLOBAL position (for bots and respawn).</summary>
         public int NearestRouteIndex(Vector3 p, int hint)
         {
             var pts = Route.points;
@@ -249,7 +251,7 @@ namespace RaceGame.Race
         {
             if (r.car == null) return;
             int cp = Mathf.Max(0, (r.nextCheckpoint - 1) % checkpoints.Count);
-            Vector3 pos = checkpoints[cp] + Vector3.up * 1.2f;
+            Vector3 pos = OriginShift.ToLocal(checkpoints[cp]) + Vector3.up * 1.2f;
             var rb = r.car.Body;
             r.car.SetFrozen(true);
             r.car.transform.SetPositionAndRotation(pos, Quaternion.LookRotation(checkpointDirs[cp], Vector3.up));
@@ -303,7 +305,8 @@ namespace RaceGame.Race
         void PlaceGate(GameObject gate, int index)
         {
             gate.SetActive(true);
-            gate.transform.SetPositionAndRotation(checkpoints[index], Quaternion.LookRotation(checkpointDirs[index], Vector3.up));
+            gate.transform.localPosition = checkpoints[index]; // parent sits at -Offset
+            gate.transform.rotation = Quaternion.LookRotation(checkpointDirs[index], Vector3.up);
         }
 
         static void SetGateMat(GameObject gate, Material m)

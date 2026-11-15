@@ -6,6 +6,7 @@ namespace RaceGame.World
     public class Town
     {
         public string name;
+        public Vector2Int cell;
         public Vector2 center;
         public float radius = 260f;
         public float height;
@@ -16,16 +17,25 @@ namespace RaceGame.World
 
     public class Road
     {
+        public string id;
         public string name;
         public bool highway;
         public float halfWidth;
-        public readonly List<Vector3> points = new List<Vector3>(); // x, height, z
+        public readonly List<Vector3> points = new List<Vector3>(); // GLOBAL x, height, z
+        public Rect bounds;                                         // x/z bounding box
         public float yOffset => highway ? 0.06f : 0.09f;
+
+        public void ComputeBounds()
+        {
+            float x0 = float.MaxValue, z0 = float.MaxValue, x1 = float.MinValue, z1 = float.MinValue;
+            foreach (var p in points) { x0 = Mathf.Min(x0, p.x); x1 = Mathf.Max(x1, p.x); z0 = Mathf.Min(z0, p.z); z1 = Mathf.Max(z1, p.z); }
+            bounds = Rect.MinMaxRect(x0 - halfWidth, z0 - halfWidth, x1 + halfWidth, z1 + halfWidth);
+        }
     }
 
     public struct Building
     {
-        public Vector3 position; // base centre
+        public Vector3 position; // GLOBAL base centre
         public Vector3 size;
         public int color;
     }
@@ -36,7 +46,7 @@ namespace RaceGame.World
         public string name;
         public bool circuit;
         public int laps = 1;
-        public readonly List<Vector3> points = new List<Vector3>();
+        public readonly List<Vector3> points = new List<Vector3>(); // GLOBAL
         public float Length
         {
             get
@@ -50,60 +60,75 @@ namespace RaceGame.World
     }
 
     /// <summary>
-    /// Deterministic description of the whole 8×8 km island: relief, towns, roads, buildings, race routes.
-    /// The same seed gives the same map on every device (needed for LAN play).
-    /// The map is centred on the origin: x and z go from -4000 to 4000.
+    /// Endless deterministic world, generated lazily in 3×3 km cells: relief, towns, highways, buildings, race routes.
+    /// Same seed → same world on every device, no matter in which order cells are visited (needed for LAN play).
+    /// All coordinates here are GLOBAL (see OriginShift for the local/global conversion).
     /// </summary>
     public class MapLayout
     {
-        public const float Size = 8000f;
-        public const float Half = Size * 0.5f;
+        public const float CellSize = 3000f;
         public const float SeaLevel = 8f;
         public const float MinY = -30f;
         public const float HeightRange = 280f;
         public const float SampleStep = 8f; // road sample spacing, m
+        const float TownChance = 0.75f;
 
         public readonly int seed;
-        public readonly List<Town> towns = new List<Town>();
-        public readonly List<Road> roads = new List<Road>();
+        public readonly List<Town> towns = new List<Town>();         // generated so far
+        public readonly List<Road> roads = new List<Road>();         // generated so far
         public readonly List<Building> buildings = new List<Building>();
-        public readonly List<RouteData> routes = new List<RouteData>();
 
         public Vector3 SpawnPoint { get; private set; }
         public Vector3 SpawnForward { get; private set; }
 
         readonly float ox, oz;
         readonly SegmentGrid grid = new SegmentGrid(50f);
+        readonly Dictionary<Vector2Int, Town> townByCell = new Dictionary<Vector2Int, Town>();
+        readonly HashSet<Vector2Int> townDone = new HashSet<Vector2Int>();
+        readonly HashSet<Vector2Int> roadsDone = new HashSet<Vector2Int>();
+        readonly Dictionary<string, Road> roadById = new Dictionary<string, Road>();
+        Vector2Int lastEnsuredCell = new Vector2Int(int.MinValue, int.MinValue);
 
-        static readonly (string name, float x, float z)[] TownSpots =
+        static readonly string[] Syllables =
         {
-            ("Приморск", -0.62f, -0.58f),
-            ("Лесное", -0.08f, -0.40f),
-            ("Солнечный", 0.48f, -0.64f),
-            ("Восток", 0.66f, -0.12f),
-            ("Заречье", 0.58f, 0.48f),
-            ("Каменка", -0.02f, 0.72f),
-            ("Северск", -0.52f, 0.60f),
-            ("Центральный", -0.30f, 0.08f),
+            "ка", "ли", "мо", "ре", "сан", "то", "ви", "но", "ра", "де", "лес", "гор", "бе", "ре", "за", "по",
+            "ми", "сто", "ва", "ла", "кам", "ни", "ку", "яр", "ос", "тин", "дуб", "ров", "сол", "не",
         };
+        static readonly string[] Endings = { "ск", "ово", "ино", "ка", "ье", "ный", "град", "поль", "овка", "ец" };
 
         public MapLayout(int seed)
         {
             this.seed = seed;
-            var rng = new System.Random(seed);
-            ox = (float)rng.NextDouble() * 1000f;
-            oz = (float)rng.NextDouble() * 1000f;
+            uint h = Hash(seed, 7, 13);
+            ox = (h % 100000) / 100f;
+            oz = ((h / 100000) % 100000) / 100f;
 
-            BuildTowns();
-            BuildRoads(rng);
-            foreach (var r in roads) grid.Add(r);
-            BuildBuildings(rng);
-            BuildRoutes();
-
-            var start = towns[0];
+            EnsureArea(0f, 0f);
+            var start = townByCell[Vector2Int.zero];
             SpawnPoint = new Vector3(start.center.x, start.height + 0.6f, start.center.y - 20f);
             SpawnForward = Vector3.forward;
         }
+
+        // ------------------------------------------------------------------ hashing
+
+        /// <summary>Deterministic integer hash (System.HashCode is randomised per process, so it can't be used).</summary>
+        public static uint Hash(int a, int b, int c)
+        {
+            unchecked
+            {
+                uint h = 2166136261u;
+                h = (h ^ (uint)a) * 16777619u;
+                h = (h ^ (uint)b) * 16777619u;
+                h = (h ^ (uint)c) * 16777619u;
+                h ^= h >> 15; h *= 2246822519u; h ^= h >> 13; h *= 3266489917u; h ^= h >> 16;
+                return h;
+            }
+        }
+
+        static float Hash01(uint h) => (h & 0xFFFFFF) / (float)0x1000000;
+
+        public static Vector2Int CellOf(float x, float z) =>
+            new Vector2Int(Mathf.FloorToInt(x / CellSize), Mathf.FloorToInt(z / CellSize));
 
         // ------------------------------------------------------------------ relief
 
@@ -128,27 +153,23 @@ namespace RaceGame.World
             return sum / norm;
         }
 
-        /// <summary>X coordinate of the river at a given z.</summary>
-        public static float RiverX(float z) => 900f + 450f * Mathf.Sin(z * 0.0011f + 1.3f) + 150f * Mathf.Sin(z * 0.003f);
-
-        /// <summary>Natural relief without towns and roads.</summary>
+        /// <summary>Natural relief without towns and roads: plains, hills, mountain ranges, rivers and seas.</summary>
         public float BaseHeight(float x, float z)
         {
-            float nx = x / Half, nz = z / Half;
-            float edge = Mathf.Max(Mathf.Abs(nx), Mathf.Abs(nz));
-            float coast = (Perlin(x * 0.0008f, z * 0.0008f) - 0.5f) * 0.18f;
-            float land = 1f - Smooth(0.80f, 0.96f, edge + coast);
+            // continents and seas
+            float cont = Fbm(x * 0.00009f + 1000f, z * 0.00009f + 1000f, 3);
+            float land = Smooth(0.36f, 0.44f, cont);
 
             float h = 14f + Fbm(x * 0.0007f, z * 0.0007f, 4) * 55f;
 
-            // mountains in the north-west
-            float mountainMask = Smooth(0.15f, 0.65f, (-nx + nz) * 0.5f + 0.15f);
+            // mountain ranges
+            float mountainMask = Smooth(0.52f, 0.70f, Fbm(x * 0.00015f + 300f, z * 0.00015f + 300f, 2));
             float ridge = 1f - Mathf.Abs(Fbm(x * 0.0011f + 50f, z * 0.0011f + 50f, 3) * 2f - 1f);
             h += ridge * ridge * 130f * mountainMask;
 
-            // river
-            float dr = Mathf.Abs(x - RiverX(z));
-            float river = 1f - Smooth(25f, 90f, dr);
+            // meandering rivers
+            float rv = Mathf.Abs(Fbm(x * 0.0004f + 700f, z * 0.0004f + 700f, 2) - 0.5f);
+            float river = 1f - Smooth(0.005f, 0.018f, rv);
             h = Mathf.Lerp(h, SeaLevel - 4f, river);
 
             return Mathf.Lerp(MinY + 5f, h, land);
@@ -157,9 +178,13 @@ namespace RaceGame.World
         /// <summary>Final ground height: relief flattened under towns and roads.</summary>
         public float Height(float x, float z)
         {
+            EnsureArea(x, z);
             float h = BaseHeight(x, z);
-            foreach (var t in towns)
+            var c = CellOf(x, z);
+            for (int dx = -1; dx <= 1; dx++)
+            for (int dz = -1; dz <= 1; dz++)
             {
+                if (!townByCell.TryGetValue(new Vector2Int(c.x + dx, c.y + dz), out var t)) continue;
                 float d = Vector2.Distance(new Vector2(x, z), t.center);
                 if (d > t.radius + 260f) continue;
                 float w = 1f - Smooth(t.radius, t.radius + 260f, d);
@@ -175,78 +200,140 @@ namespace RaceGame.World
 
         public bool IsLand(float x, float z) => Height(x, z) > SeaLevel + 0.8f;
 
-        public bool NearRoad(float x, float z, float distance) =>
-            grid.Nearest(x, z, distance, out _, out _, out _);
+        public bool NearRoad(float x, float z, float distance)
+        {
+            EnsureArea(x, z);
+            return grid.Nearest(x, z, distance, out _, out _, out _);
+        }
 
         public Town TownAt(float x, float z, float margin = 0f)
         {
-            foreach (var t in towns)
-                if (Vector2.Distance(new Vector2(x, z), t.center) < t.radius + margin) return t;
+            EnsureArea(x, z);
+            var c = CellOf(x, z);
+            for (int dx = -1; dx <= 1; dx++)
+            for (int dz = -1; dz <= 1; dz++)
+                if (townByCell.TryGetValue(new Vector2Int(c.x + dx, c.y + dz), out var t) &&
+                    Vector2.Distance(new Vector2(x, z), t.center) < t.radius + margin) return t;
             return null;
         }
 
-        // ------------------------------------------------------------------ towns
+        // ------------------------------------------------------------------ lazy generation
 
-        void BuildTowns()
+        /// <summary>
+        /// Makes sure everything that can influence the point (x,z) exists: towns of the surrounding cells and
+        /// all highways that start within two cells (a highway never leaves its two cells by more than ~1 km).
+        /// </summary>
+        public void EnsureArea(float x, float z)
         {
-            foreach (var spot in TownSpots)
-            {
-                var c = new Vector2(spot.x * Half, spot.z * Half);
-                var town = new Town { name = spot.name, center = c };
-                town.height = Mathf.Max(SeaLevel + 3f, BaseHeight(c.x, c.y));
-                towns.Add(town);
+            var c = CellOf(x, z);
+            if (c == lastEnsuredCell) return; // Height() is called ~60k times per tile, mostly in the same cell
+            lastEnsuredCell = c;
+            for (int dx = -2; dx <= 2; dx++)
+            for (int dz = -2; dz <= 2; dz++)
+                EnsureRoads(new Vector2Int(c.x + dx, c.y + dz));
+        }
 
-                // street grid
-                float e = town.HalfExtent;
-                for (int k = -Town.StreetHalfCount; k <= Town.StreetHalfCount; k++)
-                {
-                    float off = k * Town.StreetStep;
-                    roads.Add(Straight($"{town.name}: улица {k + 3}", new Vector3(c.x + off, town.height, c.y - e), new Vector3(c.x + off, town.height, c.y + e)));
-                    roads.Add(Straight($"{town.name}: проспект {k + 3}", new Vector3(c.x - e, town.height, c.y + off), new Vector3(c.x + e, town.height, c.y + off)));
-                }
+        Town EnsureTown(Vector2Int cell)
+        {
+            if (townDone.Contains(cell))
+            {
+                townByCell.TryGetValue(cell, out var existing);
+                return existing;
+            }
+            townDone.Add(cell);
+
+            uint h = Hash(seed, cell.x, cell.y);
+            bool origin = cell == Vector2Int.zero;
+            if (!origin && Hash01(h) > TownChance) return null;
+
+            float jx = (Hash01(Hash((int)h, 1, 0)) - 0.5f) * 1400f;
+            float jz = (Hash01(Hash((int)h, 2, 0)) - 0.5f) * 1400f;
+            var c = new Vector2((cell.x + 0.5f) * CellSize + jx, (cell.y + 0.5f) * CellSize + jz);
+            if (origin) c = Vector2.zero;
+            float baseH = BaseHeight(c.x, c.y);
+            if (!origin && baseH < SeaLevel + 1f) return null; // no towns in the sea
+
+            var town = new Town { cell = cell, center = c, name = TownName(h), height = Mathf.Max(SeaLevel + 3f, baseH) };
+            townByCell[cell] = town;
+            towns.Add(town);
+
+            float e = town.HalfExtent;
+            for (int k = -Town.StreetHalfCount; k <= Town.StreetHalfCount; k++)
+            {
+                float off = k * Town.StreetStep;
+                AddRoad(Straight($"t{cell.x}_{cell.y}_v{k}", $"{town.name}: улица {k + 3}",
+                    new Vector3(c.x + off, town.height, c.y - e), new Vector3(c.x + off, town.height, c.y + e)));
+                AddRoad(Straight($"t{cell.x}_{cell.y}_h{k}", $"{town.name}: проспект {k + 3}",
+                    new Vector3(c.x - e, town.height, c.y + off), new Vector3(c.x + e, town.height, c.y + off)));
+            }
+            BuildBuildings(town, new System.Random((int)Hash((int)h, 3, 0)));
+            return town;
+        }
+
+        static string TownName(uint h)
+        {
+            var rng = new System.Random((int)h);
+            int parts = 1 + rng.Next(2);
+            string s = "";
+            for (int i = 0; i < parts; i++) s += Syllables[rng.Next(Syllables.Length)];
+            s += Endings[rng.Next(Endings.Length)];
+            return char.ToUpper(s[0]) + s.Substring(1);
+        }
+
+        /// <summary>Highways that start in this cell: to the east and north neighbours (north-east if one of them is empty).</summary>
+        void EnsureRoads(Vector2Int cell)
+        {
+            if (roadsDone.Contains(cell)) return;
+            roadsDone.Add(cell);
+            var a = EnsureTown(cell);
+            if (a == null) return;
+            var east = EnsureTown(cell + new Vector2Int(1, 0));
+            var north = EnsureTown(cell + new Vector2Int(0, 1));
+            if (east != null) AddRoad(Highway(HighwayId(cell, "E"), a, east));
+            if (north != null) AddRoad(Highway(HighwayId(cell, "N"), a, north));
+            if (east == null || north == null)
+            {
+                var ne = EnsureTown(cell + new Vector2Int(1, 1));
+                if (ne != null) AddRoad(Highway(HighwayId(cell, "NE"), a, ne));
             }
         }
 
-        static Road Straight(string name, Vector3 a, Vector3 b)
+        static string HighwayId(Vector2Int cell, string dir) => $"hw_{cell.x}_{cell.y}_{dir}";
+
+        void AddRoad(Road r)
         {
-            var r = new Road { name = name, highway = false, halfWidth = 5.5f };
+            r.ComputeBounds();
+            roads.Add(r);
+            roadById[r.id] = r;
+            grid.Add(r);
+        }
+
+        static Road Straight(string id, string name, Vector3 a, Vector3 b)
+        {
+            var r = new Road { id = id, name = name, highway = false, halfWidth = 5.5f };
             int n = Mathf.Max(1, Mathf.CeilToInt(Vector3.Distance(a, b) / SampleStep));
             for (int i = 0; i <= n; i++) r.points.Add(Vector3.Lerp(a, b, i / (float)n));
             return r;
         }
 
-        // ------------------------------------------------------------------ highways
-
-        void BuildRoads(System.Random rng)
+        Road Highway(string id, Town a, Town b)
         {
-            // ring through the outer towns (indices 0..6), plus roads from the central town
-            for (int i = 0; i < 7; i++)
-                roads.Add(Highway(towns[i], towns[(i + 1) % 7], rng));
-            roads.Add(Highway(towns[7], towns[0], rng));
-            roads.Add(Highway(towns[7], towns[6], rng));
-            roads.Add(Highway(towns[7], towns[1], rng));
-            roads.Add(Highway(towns[7], towns[4], rng));
-        }
-
-        Road Highway(Town a, Town b, System.Random rng)
-        {
-            var road = new Road { name = $"Трасса {a.name} — {b.name}", highway = true, halfWidth = 7f };
+            var rng = new System.Random((int)Hash(seed, id.GetHashCodeStable(), 99));
+            var road = new Road { id = id, name = $"Трасса {a.name} — {b.name}", highway = true, halfWidth = 7f };
             Vector2 p0 = a.center, p3 = b.center;
             Vector2 dir = (p3 - p0).normalized;
             Vector2 perp = new Vector2(-dir.y, dir.x);
             float len = Vector2.Distance(p0, p3);
-            // control points: leave each town straight along the main street, bend in between
             var ctrl = new List<Vector2>
             {
                 p0,
                 p0 + dir * Mathf.Min(300f, len * 0.15f),
-                Vector2.Lerp(p0, p3, 0.38f) + perp * ((float)rng.NextDouble() - 0.5f) * len * 0.3f,
-                Vector2.Lerp(p0, p3, 0.68f) + perp * ((float)rng.NextDouble() - 0.5f) * len * 0.3f,
+                Vector2.Lerp(p0, p3, 0.38f) + perp * ((float)rng.NextDouble() - 0.5f) * len * 0.25f,
+                Vector2.Lerp(p0, p3, 0.68f) + perp * ((float)rng.NextDouble() - 0.5f) * len * 0.25f,
                 p3 - dir * Mathf.Min(300f, len * 0.15f),
                 p3,
             };
 
-            // Catmull-Rom sampling every SampleStep metres
             var flat = new List<Vector2>();
             for (int s = 0; s < ctrl.Count - 1; s++)
             {
@@ -256,7 +343,6 @@ namespace RaceGame.World
             }
             flat.Add(p3);
 
-            // height profile: follow relief, never below water, smooth, limit grade, exact town height inside towns
             int count = flat.Count;
             var h = new float[count];
             for (int i = 0; i < count; i++) h[i] = Mathf.Max(SeaLevel + 2.5f, BaseHeight(flat[i].x, flat[i].y));
@@ -264,6 +350,7 @@ namespace RaceGame.World
             const float maxGrade = 0.09f;
             for (int i = 1; i < count; i++) h[i] = Mathf.Clamp(h[i], h[i - 1] - maxGrade * SampleStep, h[i - 1] + maxGrade * SampleStep);
             for (int i = count - 2; i >= 0; i--) h[i] = Mathf.Clamp(h[i], h[i + 1] - maxGrade * SampleStep, h[i + 1] + maxGrade * SampleStep);
+
             var pinned = new bool[count];
             for (int i = 0; i < count; i++)
             {
@@ -272,10 +359,9 @@ namespace RaceGame.World
                     float d = Vector2.Distance(flat[i], t.center);
                     float w = 1f - Smooth(t.radius - 20f, t.radius + 180f, d);
                     h[i] = Mathf.Lerp(h[i], t.height, w);
-                    if (w > 0.999f) pinned[i] = true; // inside the town: exactly the street height
+                    if (w > 0.999f) pinned[i] = true;
                 }
             }
-            // blending into a town on a hill may steepen the road: limit the grade again, keeping town points fixed
             for (int pass = 0; pass < 2; pass++)
             {
                 for (int i = 1; i < count; i++)
@@ -305,77 +391,94 @@ namespace RaceGame.World
             return dst;
         }
 
-        // ------------------------------------------------------------------ buildings
-
-        void BuildBuildings(System.Random rng)
+        void BuildBuildings(Town t, System.Random rng)
         {
-            foreach (var t in towns)
+            float e = t.HalfExtent;
+            int blocks = Town.StreetHalfCount * 2;
+            for (int bx = 0; bx < blocks; bx++)
+            for (int bz = 0; bz < blocks; bz++)
             {
-                float e = t.HalfExtent;
-                int blocks = Town.StreetHalfCount * 2;
-                for (int bx = 0; bx < blocks; bx++)
-                for (int bz = 0; bz < blocks; bz++)
+                float x0 = t.center.x - e + bx * Town.StreetStep + 12f;
+                float z0 = t.center.y - e + bz * Town.StreetStep + 12f;
+                float inner = Town.StreetStep - 24f;
+                for (int px = 0; px < 2; px++)
+                for (int pz = 0; pz < 2; pz++)
                 {
-                    float x0 = t.center.x - e + bx * Town.StreetStep + 12f;
-                    float z0 = t.center.y - e + bz * Town.StreetStep + 12f;
-                    float inner = Town.StreetStep - 24f; // 96 m of buildable space
-                    // 2×2 plots per block, some left empty as parking/park
-                    for (int px = 0; px < 2; px++)
-                    for (int pz = 0; pz < 2; pz++)
+                    if (rng.NextDouble() < 0.2) continue;
+                    float plot = inner * 0.5f;
+                    float w = plot * (0.55f + (float)rng.NextDouble() * 0.35f);
+                    float d = plot * (0.55f + (float)rng.NextDouble() * 0.35f);
+                    bool centre = Mathf.Abs(bx - blocks / 2 + 0.5f) < 1f && Mathf.Abs(bz - blocks / 2 + 0.5f) < 1f;
+                    float hgt = centre ? 15f + (float)rng.NextDouble() * 35f : 6f + (float)rng.NextDouble() * 14f;
+                    buildings.Add(new Building
                     {
-                        if (rng.NextDouble() < 0.2) continue;
-                        float plot = inner * 0.5f;
-                        float w = plot * (0.55f + (float)rng.NextDouble() * 0.35f);
-                        float d = plot * (0.55f + (float)rng.NextDouble() * 0.35f);
-                        bool centre = Mathf.Abs(bx - blocks / 2 + 0.5f) < 1f && Mathf.Abs(bz - blocks / 2 + 0.5f) < 1f;
-                        float hgt = centre ? 15f + (float)rng.NextDouble() * 35f : 6f + (float)rng.NextDouble() * 14f;
-                        buildings.Add(new Building
-                        {
-                            position = new Vector3(x0 + plot * (px + 0.5f), t.height, z0 + plot * (pz + 0.5f)),
-                            size = new Vector3(w, hgt, d),
-                            color = rng.Next(0, 6),
-                        });
-                    }
+                        position = new Vector3(x0 + plot * (px + 0.5f), t.height, z0 + plot * (pz + 0.5f)),
+                        size = new Vector3(w, hgt, d),
+                        color = rng.Next(0, 6),
+                    });
                 }
             }
         }
 
         // ------------------------------------------------------------------ race routes
 
-        void BuildRoutes()
+        /// <summary>Race routes around a point: circuits of nearby towns and sprints along their highways, nearest first.</summary>
+        public List<RouteData> RoutesNear(float x, float z)
         {
-            // circuits around each town along the outer streets
-            foreach (var t in towns)
+            EnsureArea(x, z);
+            var c = CellOf(x, z);
+            var list = new List<RouteData>();
+            var nearTowns = new List<Town>();
+            for (int dx = -1; dx <= 1; dx++)
+            for (int dz = -1; dz <= 1; dz++)
+                if (townByCell.TryGetValue(new Vector2Int(c.x + dx, c.y + dz), out var t)) nearTowns.Add(t);
+            var here = new Vector2(x, z);
+            nearTowns.Sort((a, b) => Vector2.Distance(a.center, here).CompareTo(Vector2.Distance(b.center, here)));
+
+            foreach (var t in nearTowns)
             {
-                var r = new RouteData { id = "circuit_" + towns.IndexOf(t), name = $"Кольцо: {t.name}", circuit = true, laps = 3 };
+                list.Add(FindRoute($"circuit_{t.cell.x}_{t.cell.y}"));
+                foreach (var dir in new[] { "E", "N", "NE" })
+                {
+                    var r = FindRoute($"sprint_{t.cell.x}_{t.cell.y}_{dir}");
+                    if (r != null) list.Add(r);
+                }
+            }
+            list.RemoveAll(r => r == null);
+            return list;
+        }
+
+        /// <summary>Rebuilds a route from its id (ids travel over LAN, so they must be self-contained).</summary>
+        public RouteData FindRoute(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return null;
+            var parts = id.Split('_');
+            if (parts.Length < 3 || !int.TryParse(parts[1], out int cx) || !int.TryParse(parts[2], out int cz)) return null;
+            var cell = new Vector2Int(cx, cz);
+            EnsureRoads(cell);
+
+            if (parts[0] == "circuit")
+            {
+                var t = EnsureTown(cell);
+                if (t == null) return null;
+                var r = new RouteData { id = id, name = $"Кольцо: {t.name}", circuit = true, laps = 3 };
                 float e = t.HalfExtent;
                 var c = new Vector3(t.center.x, t.height, t.center.y);
                 AddLine(r.points, c + new Vector3(-e, 0, -e), c + new Vector3(e, 0, -e));
                 AddLine(r.points, c + new Vector3(e, 0, -e), c + new Vector3(e, 0, e));
                 AddLine(r.points, c + new Vector3(e, 0, e), c + new Vector3(-e, 0, e));
                 AddLine(r.points, c + new Vector3(-e, 0, e), c + new Vector3(-e, 0, -e));
-                r.points.RemoveAt(r.points.Count - 1); // circuit: last point = first
-                routes.Add(r);
+                r.points.RemoveAt(r.points.Count - 1);
+                return r;
             }
-
-            // sprints along every highway
-            int n = 0;
-            foreach (var road in roads)
+            if (parts[0] == "sprint" && parts.Length >= 4)
             {
-                if (!road.highway) continue;
-                var r = new RouteData { id = "sprint_" + n++, name = "Спринт: " + road.name.Replace("Трасса ", ""), circuit = false };
+                if (!roadById.TryGetValue(HighwayId(cell, parts[3]), out var road)) return null;
+                var r = new RouteData { id = id, name = "Спринт: " + road.name.Replace("Трасса ", ""), circuit = false };
                 r.points.AddRange(road.points);
-                routes.Add(r);
+                return r;
             }
-
-            // grand tour: the whole outer ring
-            var ring = new RouteData { id = "grand_ring", name = "Большое кольцо острова", circuit = true, laps = 1 };
-            for (int i = 0; i < 7; i++)
-            {
-                var pts = roads.Find(rd => rd.highway && rd.name == $"Трасса {towns[i].name} — {towns[(i + 1) % 7].name}").points;
-                for (int k = 0; k < pts.Count - 1; k++) ring.points.Add(pts[k]);
-            }
-            routes.Add(ring);
+            return null;
         }
 
         static void AddLine(List<Vector3> list, Vector3 a, Vector3 b)
@@ -385,7 +488,52 @@ namespace RaceGame.World
             list.Add(b);
         }
 
-        public RouteData FindRoute(string id) => routes.Find(r => r.id == id);
+        // ------------------------------------------------------------------ queries for streaming
+
+        public IEnumerable<Road> RoadsIn(Rect area)
+        {
+            foreach (var r in roads)
+                if (r.bounds.Overlaps(area)) yield return r;
+        }
+
+        public IEnumerable<Building> BuildingsIn(Rect area)
+        {
+            foreach (var b in buildings)
+                if (area.Contains(new Vector2(b.position.x, b.position.z))) yield return b;
+        }
+
+        /// <summary>Nearest point on any generated road (global), facing along it.</summary>
+        public Pose NearestRoadPose(Vector3 p)
+        {
+            EnsureArea(p.x, p.z);
+            float best = float.MaxValue;
+            var pose = new Pose(SpawnPoint, Quaternion.LookRotation(SpawnForward));
+            var area = new Rect(p.x - 1500f, p.z - 1500f, 3000f, 3000f);
+            foreach (var r in RoadsIn(area))
+                for (int i = 0; i < r.points.Count - 1; i += 2)
+                {
+                    float d = (r.points[i] - p).sqrMagnitude;
+                    if (d >= best) continue;
+                    best = d;
+                    Vector3 dir = r.points[i + 1] - r.points[i]; dir.y = 0f;
+                    pose = new Pose(r.points[i] + Vector3.up * 1f, Quaternion.LookRotation(dir.sqrMagnitude > 0.01f ? dir : Vector3.forward));
+                }
+            return pose;
+        }
+    }
+
+    static class StableHashExtensions
+    {
+        /// <summary>String hash that is the same on every run and platform.</summary>
+        public static int GetHashCodeStable(this string s)
+        {
+            unchecked
+            {
+                int h = 23;
+                foreach (char ch in s) h = h * 31 + ch;
+                return h;
+            }
+        }
     }
 
     /// <summary>Spatial hash of road segments for fast "nearest road" queries.</summary>
@@ -431,7 +579,6 @@ namespace RaceGame.World
                 float t = len2 > 0f ? Mathf.Clamp01(((x - s.a.x) * abx + (z - s.a.z) * abz) / len2) : 0f;
                 float px = s.a.x + abx * t, pz = s.a.z + abz * t;
                 float d = Mathf.Sqrt((x - px) * (x - px) + (z - pz) * (z - pz));
-                // prefer the road whose surface reaches us (distance minus width)
                 if (d - s.halfWidth < dist - halfWidth && d <= maxDist)
                 {
                     dist = d; halfWidth = s.halfWidth;

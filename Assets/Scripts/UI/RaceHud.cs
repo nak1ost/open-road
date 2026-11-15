@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using RaceGame.Race;
+using RaceGame.World;
 using UnityEngine;
 
 namespace RaceGame.UI
@@ -52,7 +53,7 @@ namespace RaceGame.UI
                 $"{lap}{MenuUI.FormatTime(local.Finished ? local.finishTime : race.Clock)}", small);
             if (!local.Finished && player != null)
             {
-                float d = Vector3.Distance(player.position, race.NextCheckpointPosition(local));
+                float d = Vector3.Distance(OriginShift.ToGlobal(player.position), race.NextCheckpointPosition(local));
                 GUI.Label(new Rect(x, y + unit * 4.1f, w, unit * 1.5f), $"До чекпоинта: {d:0} м", small);
             }
             else if (local.Finished)
@@ -61,16 +62,21 @@ namespace RaceGame.UI
             }
         }
 
+        void Update()
+        {
+            if (minimap != null && player != null) minimap.Follow(OriginShift.ToGlobal(player.position));
+        }
+
         void DrawMinimap(int unit)
         {
             if (minimap == null || player == null) return;
             float size = Screen.height * 0.26f;
             var rect = new Rect(Screen.width - size - unit, Screen.height - size - unit * 6f, size, size);
             var markers = new List<(Vector3, Color, float)>();
-            foreach (var o in others) if (o != null) markers.Add((o.position, new Color(0.3f, 0.7f, 1f), size * 0.035f));
+            foreach (var o in others) if (o != null) markers.Add((OriginShift.ToGlobal(o.position), new Color(0.3f, 0.7f, 1f), size * 0.035f));
             if (race != null && race.Local != null && !race.Local.Finished)
                 markers.Add((race.NextCheckpointPosition(race.Local), new Color(1f, 0.8f, 0.1f), size * 0.04f));
-            markers.Add((player.position, Color.red, size * 0.05f));
+            markers.Add((OriginShift.ToGlobal(player.position), Color.red, size * 0.05f));
             minimap.Draw(rect, markers, race != null ? race.Route.points : null);
         }
     }

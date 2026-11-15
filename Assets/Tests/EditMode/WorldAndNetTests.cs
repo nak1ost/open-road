@@ -8,37 +8,11 @@ namespace RaceGame.Tests
 {
     public class WorldTests
     {
-        static MapLayout map;
-        static MapLayout Map => map ??= new MapLayout(20261115);
+        const int Seed = 20261115;
 
-        [Test]
-        public void Map_HasTownsRoadsAndRoutes()
+        static void AssertHighwaysOk(MapLayout m)
         {
-            Assert.That(Map.towns.Count, Is.EqualTo(8));
-            Assert.That(Map.roads.FindAll(r => r.highway).Count, Is.GreaterThanOrEqualTo(10));
-            Assert.That(Map.routes.Count, Is.GreaterThanOrEqualTo(15));
-            Assert.That(Map.buildings.Count, Is.GreaterThan(200));
-        }
-
-        [Test]
-        public void Map_IsDeterministic()
-        {
-            var other = new MapLayout(20261115);
-            Assert.That(other.Height(123f, -456f), Is.EqualTo(Map.Height(123f, -456f)));
-            Assert.That(other.roads[90].points[10], Is.EqualTo(Map.roads[90].points[10]));
-        }
-
-        [Test]
-        public void Spawn_IsOnLand()
-        {
-            var s = Map.SpawnPoint;
-            Assert.That(Map.Height(s.x, s.z), Is.GreaterThan(MapLayout.SeaLevel));
-        }
-
-        [Test]
-        public void Highways_StayAboveWater_AndAreNotTooSteep()
-        {
-            foreach (var r in Map.roads)
+            foreach (var r in m.roads)
             {
                 if (!r.highway) continue;
                 for (int i = 1; i < r.points.Count; i++)
@@ -51,22 +25,88 @@ namespace RaceGame.Tests
         }
 
         [Test]
-        public void Map_IsEightByEightKilometres()
+        public void StartArea_HasTownsRoadsAndRoutes()
         {
-            Assert.That(MapLayout.Size, Is.EqualTo(8000f));
-            foreach (var r in Map.roads)
-            foreach (var p in r.points)
+            var m = new MapLayout(Seed);
+            Assert.That(m.towns.Count, Is.GreaterThanOrEqualTo(5));
+            Assert.That(m.roads.FindAll(r => r.highway).Count, Is.GreaterThanOrEqualTo(4));
+            Assert.That(m.buildings.Count, Is.GreaterThan(30));
+            var routes = m.RoutesNear(0f, 0f);
+            Assert.That(routes.Count, Is.GreaterThanOrEqualTo(3));
+            foreach (var r in routes) Assert.That(r.Length, Is.GreaterThan(800f), r.name);
+        }
+
+        [Test]
+        public void World_IsEndless()
+        {
+            var m = new MapLayout(Seed);
+            // 100 km and 1000 km away there are still towns and roads
+            foreach (var far in new[] { new Vector2(100000f, -100000f), new Vector2(-1000000f, 700000f) })
             {
-                Assert.That(Mathf.Abs(p.x), Is.LessThan(MapLayout.Half));
-                Assert.That(Mathf.Abs(p.z), Is.LessThan(MapLayout.Half));
+                m.EnsureArea(far.x, far.y);
+                bool townNear = m.towns.Exists(t => Vector2.Distance(t.center, far) < 6000f);
+                Assert.That(townNear, Is.True, $"no town near {far}");
+                Assert.That(float.IsNaN(m.Height(far.x, far.y)), Is.False);
             }
         }
 
         [Test]
-        public void Routes_AreLongEnough()
+        public void World_DoesNotDependOnVisitOrder()
         {
-            foreach (var r in Map.routes)
-                Assert.That(r.Length, Is.GreaterThan(800f), r.name);
+            // player A goes east first, player B goes north first — the same place must look the same
+            var a = new MapLayout(Seed);
+            var b = new MapLayout(Seed);
+            a.EnsureArea(20000f, 0f); a.EnsureArea(20000f, 20000f);
+            b.EnsureArea(0f, 20000f); b.EnsureArea(20000f, 20000f);
+            for (int i = 0; i < 50; i++)
+            {
+                float x = 17000f + i * 131f, z = 18000f + i * 97f;
+                Assert.That(a.Height(x, z), Is.EqualTo(b.Height(x, z)).Within(1e-4f), $"at {x},{z}");
+            }
+            var ra = a.FindRoute("circuit_6_6");
+            var rb = b.FindRoute("circuit_6_6");
+            Assert.That(ra == null, Is.EqualTo(rb == null));
+        }
+
+        [Test]
+        public void RouteIds_RoundTrip()
+        {
+            var m = new MapLayout(Seed);
+            foreach (var r in m.RoutesNear(0f, 0f))
+            {
+                var again = new MapLayout(Seed).FindRoute(r.id);
+                Assert.That(again, Is.Not.Null, r.id);
+                Assert.That(again.points.Count, Is.EqualTo(r.points.Count), r.id);
+                Assert.That(again.points[again.points.Count / 2], Is.EqualTo(r.points[r.points.Count / 2]), r.id);
+            }
+        }
+
+        [Test]
+        public void DifferentSeeds_GiveDifferentWorlds()
+        {
+            var a = new MapLayout(1);
+            var b = new MapLayout(987654321);
+            Assert.That(a.BaseHeight(500f, 500f), Is.Not.EqualTo(b.BaseHeight(500f, 500f)));
+        }
+
+        [TestCase(1)]
+        [TestCase(42)]
+        [TestCase(777777)]
+        [TestCase(999999999)]
+        public void AnySeed_GivesPlayableStart(int seed)
+        {
+            var m = new MapLayout(seed);
+            var s = m.SpawnPoint;
+            Assert.That(m.Height(s.x, s.z), Is.GreaterThan(MapLayout.SeaLevel), "spawn on land");
+            AssertHighwaysOk(m);
+        }
+
+        [Test]
+        public void FarHighways_AreDrivable()
+        {
+            var m = new MapLayout(Seed);
+            m.EnsureArea(50000f, 50000f);
+            AssertHighwaysOk(m);
         }
     }
 

@@ -70,6 +70,7 @@ namespace RaceGame.Core
         {
             Application.targetFrameRate = 60;
             Time.fixedDeltaTime = 1f / 60f;
+            OriginShift.Reset();
             Screen.sleepTimeout = SleepTimeout.NeverSleep;
 
             RenderSettings.fog = true;
@@ -79,10 +80,8 @@ namespace RaceGame.Core
             RenderSettings.fogColor = new Color(0.72f, 0.80f, 0.88f);
             EnsureSun();
 
-            layout = new MapLayout(MapSeed);
-            world = new GameObject("World").AddComponent<WorldStreamer>();
-            world.Init(layout);
-            minimap = new Minimap(layout);
+            int seed = SaveSystem.Data.mapSeed != 0 ? SaveSystem.Data.mapSeed : MapSeed;
+            BuildWorld(seed);
 
             SetupCameras();
             input = gameObject.AddComponent<PlayerCarInput>();
@@ -100,13 +99,58 @@ namespace RaceGame.Core
             for (int i = 0; i < all.Count; i++)
                 if (all[i].id == selected) carIndex = i;
 
-            Vector3 spawn = layout.SpawnPoint;
-            world.Prewarm(spawn);
+            Vector3 spawn = OriginShift.ToLocal(layout.SpawnPoint);
+            world.Prewarm(layout.SpawnPoint);
             spawn.y = world.GroundHeight(spawn) + 0.4f;
             SpawnCar(carIndex, spawn, Quaternion.LookRotation(layout.SpawnForward));
             world.target = car.transform;
 
             OpenMenu(MenuUI.Page.Main);
+        }
+
+        /// <summary>The player's position in GLOBAL map coordinates.</summary>
+        Vector3 PlayerGlobal => car != null ? OriginShift.ToGlobal(car.transform.position) : layout.SpawnPoint;
+
+        /// <summary>Creates the island for a seed (layout, streamed world, minimap).</summary>
+        void BuildWorld(int seed)
+        {
+            if (world != null) DestroyImmediate(world.gameObject); // old colliders must be gone before raycasts on the new island
+            layout = new MapLayout(seed);
+            world = new GameObject("World").AddComponent<WorldStreamer>();
+            world.Init(layout);
+            minimap = new Minimap(layout);
+            if (raceHud != null) raceHud.minimap = minimap;
+            if (menu != null) menu.layout = layout;
+        }
+
+        /// <summary>Switches to another island (same seed → nothing happens) and puts the car at its start.</summary>
+        void LoadMap(int seed)
+        {
+            if (seed == 0) seed = MapSeed;
+            SaveSystem.Data.mapSeed = seed;
+            SaveSystem.Save();
+            if (menu != null) menu.seedText = seed.ToString();
+            if (layout != null && layout.seed == seed) return;
+
+            if (garage.IsOpen) garage.Close();
+            EndRace();
+            BuildWorld(seed);
+
+            Vector3 spawn = OriginShift.ToLocal(layout.SpawnPoint);
+            if (car != null)
+            {
+                car.SetFrozen(true);
+                car.transform.position = spawn + Vector3.up * 50f; // out of the way of the ground raycast
+            }
+            world.Prewarm(layout.SpawnPoint);
+            spawn.y = world.GroundHeight(spawn) + 0.4f;
+            if (car != null)
+            {
+                car.transform.SetPositionAndRotation(spawn, Quaternion.LookRotation(layout.SpawnForward));
+                if (!MenuOpen) car.SetFrozen(false);
+                world.target = car.transform;
+                followCam.SnapToTarget();
+            }
         }
 
         void EnsureSun()
@@ -139,8 +183,11 @@ namespace RaceGame.Core
         {
             menu.layout = layout;
             menu.playerName = SaveSystem.Data.playerName;
+            menu.seedText = layout.seed.ToString();
+            menu.onApplySeed = () => LoadMap(menu.Seed);
             menu.getNet = () => net;
             menu.getRace = () => race;
+            menu.getRoutes = () => layout.RoutesNear(PlayerGlobal.x, PlayerGlobal.z);
             menu.onFreeRoam = CloseMenu;
             menu.onResume = CloseMenu;
             menu.onSoloRace = (route, botCount) => StartRace(route, new Dictionary<int, int> { { 0, 0 } }, botCount);
@@ -234,29 +281,13 @@ namespace RaceGame.Core
             tuningJson = JsonUtility.ToJson(tuning),
         };
 
-        /// <summary>Nearest point on any road, facing along the road.</summary>
-        Pose NearestRoadPose(Vector3 p)
-        {
-            float best = float.MaxValue;
-            Pose pose = new Pose(layout.SpawnPoint, Quaternion.LookRotation(layout.SpawnForward));
-            foreach (var r in layout.roads)
-                for (int i = 0; i < r.points.Count - 1; i += 2)
-                {
-                    float d = (r.points[i] - p).sqrMagnitude;
-                    if (d >= best) continue;
-                    best = d;
-                    Vector3 dir = r.points[i + 1] - r.points[i]; dir.y = 0f;
-                    pose = new Pose(r.points[i] + Vector3.up * 1f, Quaternion.LookRotation(dir.sqrMagnitude > 0.01f ? dir : Vector3.forward));
-                }
-            return pose;
-        }
-
         void ResetToRoad()
         {
             if (race != null && race.Local != null) { race.Respawn(race.Local); return; }
-            var pose = NearestRoadPose(car.transform.position);
+            var pose = layout.NearestRoadPose(PlayerGlobal);
+            world.Prewarm(pose.position);
             car.SetFrozen(true);
-            car.transform.SetPositionAndRotation(pose.position, pose.rotation);
+            car.transform.SetPositionAndRotation(OriginShift.ToLocal(pose.position), pose.rotation);
             car.SetFrozen(false);
         }
 
@@ -330,7 +361,7 @@ namespace RaceGame.Core
             var grid = race.GridSlot(mySlot);
             world.Prewarm(grid.position);
             car.SetFrozen(true);
-            car.transform.SetPositionAndRotation(grid.position, grid.rotation);
+            car.transform.SetPositionAndRotation(OriginShift.ToLocal(grid.position), grid.rotation);
             followCam.SnapToTarget();
             race.AddRacer(myId, MyInfo().name, car, car.transform, true, false);
 
@@ -352,7 +383,7 @@ namespace RaceGame.Core
                 var botTuning = TuningData.Default(paint);
                 botTuning.ecu = rng.Next(0, 4);
                 botTuning.turbo = rng.Next(0, 4);
-                var bot = CarFactory.Build(spec, pose.position, pose.rotation, botTuning);
+                var bot = CarFactory.Build(spec, OriginShift.ToLocal(pose.position), pose.rotation, botTuning);
                 bot.SetFrozen(true);
                 var racer = race.AddRacer(1000 + i, spec.DisplayName, bot, bot.transform, false, true);
                 var ai = bot.gameObject.AddComponent<AIDriver>();
@@ -402,7 +433,7 @@ namespace RaceGame.Core
             LeaveLan(false);
             try
             {
-                net = NetSession.Host($"Игра {MyInfo().name}", MyInfo(), MapSeed);
+                net = NetSession.Host($"Игра {MyInfo().name}", MyInfo(), layout.seed);
             }
             catch (System.Exception e)
             {
@@ -426,13 +457,13 @@ namespace RaceGame.Core
             n.JoinedGame += () =>
             {
                 menu.message = null;
-                if (n.Seed != MapSeed) menu.message = "У хоста другая карта — обновите игру.";
+                LoadMap(n.Seed); // build the host's island
                 menu.Show(MenuUI.Page.LanLobby);
             };
             n.PlayerAdded += SpawnRemote;
             n.PlayerUpdated += info =>
             {
-                Vector3 pos = remotes.TryGetValue(info.id, out var old) ? old.transform.position : layout.SpawnPoint;
+                Vector3 pos = remotes.TryGetValue(info.id, out var old) ? old.transform.position : OriginShift.ToLocal(layout.SpawnPoint);
                 RemoveRemote(info.id);
                 SpawnRemote(info);
                 if (remotes.TryGetValue(info.id, out var rc)) rc.transform.position = pos;
@@ -470,7 +501,7 @@ namespace RaceGame.Core
             try { t = string.IsNullOrEmpty(info.tuningJson) ? null : JsonUtility.FromJson<TuningData>(info.tuningJson); }
             catch (System.Exception) { }
             t ??= TuningData.Default(Color.gray);
-            var c = CarFactory.Build(spec, layout.SpawnPoint + Vector3.down * 50f, Quaternion.identity, t);
+            var c = CarFactory.Build(spec, OriginShift.ToLocal(layout.SpawnPoint) + Vector3.down * 50f, Quaternion.identity, t);
             c.gameObject.name = "Remote_" + info.name;
             var rc = c.gameObject.AddComponent<RemoteCar>();
             rc.playerId = info.id;
@@ -521,6 +552,9 @@ namespace RaceGame.Core
                 if (input.GaragePressed || input.MenuPressed) garage.Close();
                 return;
             }
+
+            // endless map: keep the player near (0,0,0) so physics and rendering stay precise
+            if (car != null) OriginShift.Check(car.transform.position);
 
             if (MenuOpen)
             {

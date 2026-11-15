@@ -20,3 +20,4 @@
 .vs/
 .idea/
 .DS_Store
+/.utmp/

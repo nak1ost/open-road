@@ -270,7 +270,7 @@ namespace RaceGame.Net
             {
                 playerId = LocalId,
                 seq = ++seq,
-                position = car.transform.position,
+                position = World.OriginShift.ToGlobal(car.transform.position), // GLOBAL: peers have other origins
                 rotation = car.transform.rotation,
                 velocity = car.Body != null && !car.Body.isKinematic ? car.Body.linearVelocity : Vector3.zero,
                 steer = car.steerInput,
