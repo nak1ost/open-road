@@ -1,0 +1,90 @@
+# Builds the game in the cloud:
+#   • Android APK (Linux runner)
+#   • iOS unsigned IPA for SideStore (Xcode project on Linux, then compiled on a macOS runner)
+#
+# One-time setup (GitHub repo → Settings → Secrets and variables → Actions):
+#   UNITY_EMAIL, UNITY_PASSWORD  — your Unity account
+#   UNITY_LICENSE               — contents of your Unity_lic.ulf file
+#     (Windows: C:\ProgramData\Unity\Unity_lic.ulf, appears after you sign in to Unity Hub)
+# Then: Actions → Build → Run workflow. Download the artifacts at the bottom of the run page.
+
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-Android-${{ hashFiles('Packages/packages-lock.json') }}
+          restore-keys: Library-Android-
+      - uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          targetPlatform: Android
+          buildMethod: RaceGame.Editor.BuildScript.BuildAndroid
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenRoad-Android-APK
+          path: Builds/Android/OpenRoad.apk
+
+  ios-xcode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          lfs: true
+      - uses: actions/cache@v4
+        with:
+          path: Library
+          key: Library-iOS-${{ hashFiles('Packages/packages-lock.json') }}
+          restore-keys: Library-iOS-
+      - uses: game-ci/unity-builder@v4
+        env:
+          UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+          UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+          UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+        with:
+          targetPlatform: iOS
+          buildMethod: RaceGame.Editor.BuildScript.ExportIOS
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ios-xcode-project
+          path: Builds/iOS
+
+  ios-ipa:
+    needs: ios-xcode
+    runs-on: macos-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ios-xcode-project
+          path: xcode
+      - name: Build unsigned IPA
+        run: |
+          cd xcode
+          chmod -R +x . || true
+          xcodebuild -project Unity-iPhone.xcodeproj -scheme Unity-iPhone -configuration Release \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -archivePath "$RUNNER_TEMP/OpenRoad.xcarchive" archive \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" DEVELOPMENT_TEAM=""
+          mkdir -p "$RUNNER_TEMP/ipa/Payload"
+          cp -R "$RUNNER_TEMP/OpenRoad.xcarchive/Products/Applications/"*.app "$RUNNER_TEMP/ipa/Payload/"
+          cd "$RUNNER_TEMP/ipa"
+          zip -qry OpenRoad.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenRoad-iOS-IPA-SideStore
+          path: ${{ runner.temp }}/ipa/OpenRoad.ipa
